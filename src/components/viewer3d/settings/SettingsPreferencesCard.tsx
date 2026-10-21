@@ -6,6 +6,7 @@ import LightModeOutlinedIcon from '@mui/icons-material/LightModeOutlined';
 import PrivacyTipOutlinedIcon from '@mui/icons-material/PrivacyTipOutlined';
 import useAppStore from '../../../store/useAppStore';
 import { isTelemetryEnabled, setTelemetryEnabled } from '../../../utils/telemetry';
+import { setDaemonTelemetry } from '../../../utils/telemetry/daemonTelemetry';
 import SectionHeader from './SectionHeader';
 import { DURATION, blackAlpha, transition } from '@styles/tokens';
 import { useAppPalette, TYPO, FONT_WEIGHT, RADIUS } from '@styles';
@@ -32,6 +33,7 @@ export default function SettingsPreferencesCard({
     const newValue = !telemetryEnabled;
     setTelemetryEnabled(newValue);
     setTelemetryEnabledState(newValue);
+    void setDaemonTelemetry(newValue);
   };
 
   return (
