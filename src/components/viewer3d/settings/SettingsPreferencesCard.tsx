@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Box, Typography, Switch } from '@mui/material';
 import type { SxProps, Theme } from '@mui/material/styles';
 import DarkModeOutlinedIcon from '@mui/icons-material/DarkModeOutlined';
@@ -6,7 +6,11 @@ import LightModeOutlinedIcon from '@mui/icons-material/LightModeOutlined';
 import PrivacyTipOutlinedIcon from '@mui/icons-material/PrivacyTipOutlined';
 import useAppStore from '../../../store/useAppStore';
 import { isTelemetryEnabled, setTelemetryEnabled } from '../../../utils/telemetry';
-import { getDaemonTelemetry, setDaemonTelemetry } from '../../../utils/telemetry/daemonTelemetry';
+import {
+  getDaemonTelemetry,
+  markDaemonHandled,
+  setDaemonTelemetry,
+} from '../../../utils/telemetry/daemonTelemetry';
 import SectionHeader from './SectionHeader';
 import { DURATION, blackAlpha, transition } from '@styles/tokens';
 import { useAppPalette, TYPO, FONT_WEIGHT, RADIUS } from '@styles';
@@ -29,16 +33,18 @@ export default function SettingsPreferencesCard({
 
   const [telemetryEnabled, setTelemetryEnabledState] = useState<boolean>(isTelemetryEnabled());
   const [disabledByEnv, setDisabledByEnv] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const clickedRef = useRef(false);
 
-  // The robot's choice wins when a daemon answers (it may have been changed
-  // from another client); the app then follows it so one switch covers both.
+  // Show the connected robot's choice (it may have been changed from another
+  // client). Display only: saving it would carry one robot's opt-out, or its
+  // env override, into the app and onto every other robot.
   useEffect(() => {
     let cancelled = false;
     void getDaemonTelemetry().then(status => {
-      if (cancelled || status === null) return;
-      const enabled = status.enabled && !status.disabled_by_env;
-      setTelemetryEnabled(enabled);
-      setTelemetryEnabledState(enabled);
+      // A click since the read started wins over this older answer.
+      if (cancelled || clickedRef.current || status === null) return;
+      setTelemetryEnabledState(status.enabled && !status.disabled_by_env);
       setDisabledByEnv(status.disabled_by_env);
     });
     return () => {
@@ -46,12 +52,24 @@ export default function SettingsPreferencesCard({
     };
   }, []);
 
-  const handleTelemetryToggle = (): void => {
-    if (disabledByEnv) return;
-    const newValue = !telemetryEnabled;
+  const handleTelemetryToggle = async (): Promise<void> => {
+    if (disabledByEnv || busy) return;
+    clickedRef.current = true;
+    const previous = telemetryEnabled;
+    const newValue = !previous;
+    const previousApp = isTelemetryEnabled();
     setTelemetryEnabled(newValue);
     setTelemetryEnabledState(newValue);
-    void setDaemonTelemetry(newValue);
+    setBusy(true);
+    const status = await setDaemonTelemetry(newValue);
+    if (status) {
+      void markDaemonHandled();
+    } else if (await getDaemonTelemetry()) {
+      // The robot has the API but refused the write: undo the click.
+      setTelemetryEnabled(previousApp);
+      setTelemetryEnabledState(previous);
+    }
+    setBusy(false);
   };
 
   return (
@@ -104,7 +122,7 @@ export default function SettingsPreferencesCard({
             bgcolor: disabledByEnv ? rowBg : rowBgHover,
           },
         }}
-        onClick={handleTelemetryToggle}
+        onClick={() => void handleTelemetryToggle()}
       >
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
           <PrivacyTipOutlinedIcon sx={{ fontSize: TYPO.xl, color: textSecondary }} />
@@ -121,7 +139,12 @@ export default function SettingsPreferencesCard({
             )}
           </Box>
         </Box>
-        <Switch checked={telemetryEnabled} disabled={disabledByEnv} size="small" color="primary" />
+        <Switch
+          checked={telemetryEnabled}
+          disabled={disabledByEnv || busy}
+          size="small"
+          color="primary"
+        />
       </Box>
 
       <Box

@@ -12,6 +12,9 @@ export interface DaemonTelemetryStatus {
   disabled_by_env: boolean;
 }
 
+/** Robots (hardware ids) whose choice this app already set or migrated. */
+const HANDLED_ROBOTS_KEY = 'telemetry_daemon_handled';
+
 /** The connected daemon's choice, or `null` when there's no daemon or it predates the API. */
 export async function getDaemonTelemetry(): Promise<DaemonTelemetryStatus | null> {
   try {
@@ -28,8 +31,11 @@ export async function getDaemonTelemetry(): Promise<DaemonTelemetryStatus | null
   }
 }
 
-/** Best effort: daemons older than the telemetry API answer 404. */
-export async function setDaemonTelemetry(enabled: boolean): Promise<void> {
+/**
+ * Set the connected daemon's choice. Resolves the stored status, or `null`
+ * when the daemon is unreachable, refused it, or predates the API (404).
+ */
+export async function setDaemonTelemetry(enabled: boolean): Promise<DaemonTelemetryStatus | null> {
   try {
     const response = await fetchWithTimeout(
       buildApiUrl('/api/telemetry'),
@@ -41,19 +47,65 @@ export async function setDaemonTelemetry(enabled: boolean): Promise<void> {
       DAEMON_CONFIG.TIMEOUTS.COMMAND,
       { label: `${enabled ? 'Enable' : 'Disable'} daemon telemetry` }
     );
-    if (!response.ok && response.status !== 404) {
+    if (response.ok) return (await response.json()) as DaemonTelemetryStatus;
+    if (response.status !== 404) {
       console.warn(`[Telemetry] Daemon refused the choice: ${response.status}`);
     }
   } catch (error) {
     console.warn('[Telemetry] Could not reach the daemon:', error);
   }
+  return null;
+}
+
+async function getHardwareId(): Promise<string | null> {
+  try {
+    const response = await fetchWithTimeout(
+      buildApiUrl('/api/daemon/hardware-id'),
+      {},
+      DAEMON_CONFIG.TIMEOUTS.COMMAND,
+      { silent: true }
+    );
+    if (!response.ok) return null;
+    const data = (await response.json()) as { hardware_id: string | null };
+    return data.hardware_id || null;
+  } catch {
+    return null;
+  }
+}
+
+function handledRobots(): string[] {
+  try {
+    const stored = JSON.parse(localStorage.getItem(HANDLED_ROBOTS_KEY) ?? '[]') as unknown;
+    return Array.isArray(stored) ? stored.filter(id => typeof id === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+function addHandledRobot(id: string): void {
+  const ids = handledRobots();
+  if (ids.includes(id)) return;
+  try {
+    localStorage.setItem(HANDLED_ROBOTS_KEY, JSON.stringify([...ids, id]));
+  } catch (error) {
+    console.warn('[Telemetry] Failed to save handled robots:', error);
+  }
+}
+
+/** Remember that the user set this robot's choice, so the migration skips it. */
+export async function markDaemonHandled(): Promise<void> {
+  const id = await getHardwareId();
+  if (id) addHandledRobot(id);
 }
 
 /**
- * Carry an earlier opt-out over to a daemon we just connected to. Never push
- * "on": the robot may have been opted out from another client.
+ * One-time migration of an opt-out made in the app before the daemon had
+ * telemetry: sent once per robot, never "on", so a later choice made on the
+ * robot (mobile app, API) is never overridden.
  */
 export async function syncOptOutToDaemon(): Promise<void> {
   if (isTelemetryEnabled()) return;
-  await setDaemonTelemetry(false);
+  const id = await getHardwareId();
+  if (!id || handledRobots().includes(id)) return;
+  if (await setDaemonTelemetry(false)) addHandledRobot(id);
 }

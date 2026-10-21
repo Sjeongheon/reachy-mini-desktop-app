@@ -10,29 +10,51 @@ vi.mock('../index', () => ({ isTelemetryEnabled: vi.fn() }));
 
 import { fetchWithTimeout } from '../../../config/daemon';
 import { isTelemetryEnabled } from '../index';
-import { syncOptOutToDaemon } from '../daemonTelemetry';
+import { markDaemonHandled, syncOptOutToDaemon } from '../daemonTelemetry';
 
 const fetchMock = vi.mocked(fetchWithTimeout);
 const enabledMock = vi.mocked(isTelemetryEnabled);
+let hardwareId = 'robot-a';
+
+const puts = (): unknown[] =>
+  fetchMock.mock.calls.filter(([, options]) => options?.method === 'PUT').map(([, o]) => o?.body);
 
 beforeEach(() => {
   vi.clearAllMocks();
-  fetchMock.mockResolvedValue(new Response(null, { status: 200 }));
+  hardwareId = 'robot-a';
+  const store = new Map<string, string>();
+  vi.stubGlobal('localStorage', {
+    getItem: (k: string) => store.get(k) ?? null,
+    setItem: (k: string, v: string) => store.set(k, v),
+  });
+  fetchMock.mockImplementation(async (url: string) =>
+    url.endsWith('/api/daemon/hardware-id')
+      ? Response.json({ hardware_id: hardwareId })
+      : Response.json({ enabled: false, disabled_by_env: false })
+  );
 });
 
 describe('syncOptOutToDaemon', () => {
-  it('never turns the robot on, even when the app is opted in', async () => {
+  it('never turns a robot on', async () => {
     enabledMock.mockReturnValue(true);
     await syncOptOutToDaemon();
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(puts()).toEqual([]);
   });
 
-  it('pushes an opt-out to the daemon', async () => {
+  it('pushes an earlier opt-out once per robot', async () => {
     enabledMock.mockReturnValue(false);
     await syncOptOutToDaemon();
-    expect(fetchMock).toHaveBeenCalledOnce();
-    const [url, options] = fetchMock.mock.calls[0];
-    expect(url).toBe('http://robot/api/telemetry');
-    expect(options).toMatchObject({ method: 'PUT', body: JSON.stringify({ enabled: false }) });
+    await syncOptOutToDaemon();
+    hardwareId = 'robot-b';
+    await syncOptOutToDaemon();
+    const off = JSON.stringify({ enabled: false });
+    expect(puts()).toEqual([off, off]);
+  });
+
+  it('leaves alone a robot whose choice the user set from the app', async () => {
+    enabledMock.mockReturnValue(false);
+    await markDaemonHandled();
+    await syncOptOutToDaemon();
+    expect(puts()).toEqual([]);
   });
 });
