@@ -6,6 +6,28 @@
 import { DAEMON_CONFIG, buildApiUrl, fetchWithTimeout } from '../../config/daemon';
 import { isTelemetryEnabled } from './index';
 
+export interface DaemonTelemetryStatus {
+  enabled: boolean;
+  /** An environment variable on the robot forces telemetry off. */
+  disabled_by_env: boolean;
+}
+
+/** The connected daemon's choice, or `null` when there's no daemon or it predates the API. */
+export async function getDaemonTelemetry(): Promise<DaemonTelemetryStatus | null> {
+  try {
+    const response = await fetchWithTimeout(
+      buildApiUrl('/api/telemetry'),
+      {},
+      DAEMON_CONFIG.TIMEOUTS.COMMAND,
+      { silent: true }
+    );
+    if (!response.ok) return null;
+    return (await response.json()) as DaemonTelemetryStatus;
+  } catch {
+    return null;
+  }
+}
+
 /** Best effort: daemons older than the telemetry API answer 404. */
 export async function setDaemonTelemetry(enabled: boolean): Promise<void> {
   try {

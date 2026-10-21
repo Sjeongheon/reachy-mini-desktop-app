@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Box, Typography, Switch } from '@mui/material';
 import type { SxProps, Theme } from '@mui/material/styles';
 import DarkModeOutlinedIcon from '@mui/icons-material/DarkModeOutlined';
@@ -6,7 +6,7 @@ import LightModeOutlinedIcon from '@mui/icons-material/LightModeOutlined';
 import PrivacyTipOutlinedIcon from '@mui/icons-material/PrivacyTipOutlined';
 import useAppStore from '../../../store/useAppStore';
 import { isTelemetryEnabled, setTelemetryEnabled } from '../../../utils/telemetry';
-import { setDaemonTelemetry } from '../../../utils/telemetry/daemonTelemetry';
+import { getDaemonTelemetry, setDaemonTelemetry } from '../../../utils/telemetry/daemonTelemetry';
 import SectionHeader from './SectionHeader';
 import { DURATION, blackAlpha, transition } from '@styles/tokens';
 import { useAppPalette, TYPO, FONT_WEIGHT, RADIUS } from '@styles';
@@ -28,8 +28,26 @@ export default function SettingsPreferencesCard({
   const rowBgHover = palette.isDark ? blackAlpha(0.3) : blackAlpha(0.04);
 
   const [telemetryEnabled, setTelemetryEnabledState] = useState<boolean>(isTelemetryEnabled());
+  const [disabledByEnv, setDisabledByEnv] = useState(false);
+
+  // The robot's choice wins when a daemon answers (it may have been changed
+  // from another client); the app then follows it so one switch covers both.
+  useEffect(() => {
+    let cancelled = false;
+    void getDaemonTelemetry().then(status => {
+      if (cancelled || status === null) return;
+      const enabled = status.enabled && !status.disabled_by_env;
+      setTelemetryEnabled(enabled);
+      setTelemetryEnabledState(enabled);
+      setDisabledByEnv(status.disabled_by_env);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const handleTelemetryToggle = (): void => {
+    if (disabledByEnv) return;
     const newValue = !telemetryEnabled;
     setTelemetryEnabled(newValue);
     setTelemetryEnabledState(newValue);
@@ -80,23 +98,30 @@ export default function SettingsPreferencesCard({
           p: 1.5,
           borderRadius: RADIUS.xl,
           bgcolor: rowBg,
-          cursor: 'pointer',
+          cursor: disabledByEnv ? 'default' : 'pointer',
           transition: transition('background', DURATION.fast),
           '&:hover': {
-            bgcolor: rowBgHover,
+            bgcolor: disabledByEnv ? rowBg : rowBgHover,
           },
         }}
         onClick={handleTelemetryToggle}
       >
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
           <PrivacyTipOutlinedIcon sx={{ fontSize: TYPO.xl, color: textSecondary }} />
-          <Typography
-            sx={{ fontSize: TYPO.body, fontWeight: FONT_WEIGHT.medium, color: textPrimary }}
-          >
-            Share anonymous usage data
-          </Typography>
+          <Box>
+            <Typography
+              sx={{ fontSize: TYPO.body, fontWeight: FONT_WEIGHT.medium, color: textPrimary }}
+            >
+              Share anonymous usage data
+            </Typography>
+            {disabledByEnv && (
+              <Typography sx={{ fontSize: TYPO.sm, color: textSecondary }}>
+                Turned off by an environment variable on the robot.
+              </Typography>
+            )}
+          </Box>
         </Box>
-        <Switch checked={telemetryEnabled} size="small" color="primary" />
+        <Switch checked={telemetryEnabled} disabled={disabledByEnv} size="small" color="primary" />
       </Box>
 
       <Box
