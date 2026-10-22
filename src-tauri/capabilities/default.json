@@ -8,7 +8,6 @@
     "core:event:allow-emit",
     "core:event:allow-listen",
     "opener:default",
-    "positioner:default",
     "shell:allow-open",
     "core:window:allow-close",
     "core:window:allow-destroy",
