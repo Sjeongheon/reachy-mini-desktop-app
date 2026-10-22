@@ -24,6 +24,7 @@ import DiscoverAppsButton from '../discover/Button';
 import ReachiesCarousel from '@components/ReachiesCarousel';
 import { getDaemonHostname } from '../../../../config/daemon';
 import useAppStore from '../../../../store/useAppStore';
+import { appNameToLabel } from '../../../../utils/windowManager';
 import {
   ACCENT,
   DURATION,
@@ -595,9 +596,7 @@ export default function InstalledAppsSection({
               const isStartingOrRunning = isStarting || isCurrentlyRunning;
 
               const author = app.extra?.id?.split('/')?.[0] || app.extra?.author || null;
-              const isPoppedOut = openWindows.includes(
-                'app-' + app.name.replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase()
-              );
+              const isPoppedOut = openWindows.includes(appNameToLabel(app.name));
 
               const isMenuOpen = menuAppName === app.name;
               const isStartupApp = !!startupAppName && startupAppName === app.name;

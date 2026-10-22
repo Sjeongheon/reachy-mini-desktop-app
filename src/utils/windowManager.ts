@@ -29,7 +29,7 @@ export interface OpenAppWindowOptions {
  * Convert an app name to a valid Tauri window label. Tauri labels must be
  * alphanumeric / dashes / underscores only.
  */
-function appNameToLabel(appName: string): string {
+export function appNameToLabel(appName: string): string {
   return APP_WINDOW_PREFIX + appName.replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
 }
 
@@ -150,6 +150,14 @@ export async function openAppWindow(
     windowRefs.set(label, win);
     cascadeIndex++;
 
+    // Register eagerly (not in tauri://created) so UI state doesn't depend on
+    // event delivery; purge() removes it on error/destroyed.
+    try {
+      useAppStore.getState().addOpenWindow?.(label);
+    } catch {
+      // Store unavailable
+    }
+
     void win.once('tauri://created', async () => {
       if (offset > 0) {
         try {
@@ -160,11 +168,6 @@ export async function openAppWindow(
         } catch {
           // Positioning is best-effort
         }
-      }
-      try {
-        useAppStore.getState().addOpenWindow?.(label);
-      } catch {
-        // Store unavailable
       }
     });
 
