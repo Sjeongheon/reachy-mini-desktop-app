@@ -18,6 +18,8 @@ const APP_WINDOW_PREFIX = 'app-';
 const CASCADE_STEP = 20; // logical px offset per window
 
 const windowRefs: Map<string, WebviewWindow> = new Map();
+// Labels we are closing ourselves: their destroyed event must not re-embed the app.
+const managerClosing: Set<string> = new Set();
 let cascadeIndex = 0;
 
 export interface OpenAppWindowOptions {
@@ -80,9 +82,11 @@ function purge(label: string): void {
 
 /** Close a window with retry and dual-strategy fallback (JS -> Rust). */
 async function closeByLabel(label: string, maxAttempts = 2): Promise<void> {
+  managerClosing.add(label);
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const win = await resolveWindow(label);
     if (!win) {
+      managerClosing.delete(label);
       purge(label);
       return;
     }
@@ -108,6 +112,7 @@ async function closeByLabel(label: string, maxAttempts = 2): Promise<void> {
     }
   }
 
+  managerClosing.delete(label);
   purge(label);
 }
 
@@ -173,12 +178,16 @@ export async function openAppWindow(
 
     void win.once('tauri://error', () => purge(label));
     void win.once('tauri://destroyed', () => {
-      if (useAppStore.getState().currentApp) {
-        try {
-          useAppStore.getState().openEmbeddedApp?.(url);
-        } catch {
-          // Store may be unavailable
+      const closedByUser = !managerClosing.delete(label);
+      try {
+        // Re-embed only if the user closed the window of the app that is still running.
+        const store = useAppStore.getState();
+        const current = store.currentApp as { info?: { name?: string } } | null;
+        if (closedByUser && current?.info?.name === appName) {
+          store.openEmbeddedApp?.(url);
         }
+      } catch {
+        // Store may be unavailable
       }
       purge(label);
     });
