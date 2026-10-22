@@ -312,7 +312,7 @@ function OpenAppButton({
   }, [isStartingOrRunning]);
 
   useEffect(() => {
-    if (!isAccessible || !customAppUrl) return;
+    if (!isAccessible || !customAppUrl || isPoppedOut) return;
     const store = useAppStore.getState() as unknown as {
       embeddedAppDismissed: boolean;
       rightPanelView: string;
@@ -327,7 +327,7 @@ function OpenAppButton({
     } catch {
       // URL parsing failed - user can still open manually
     }
-  }, [isAccessible, customAppUrl]);
+  }, [isAccessible, customAppUrl, isPoppedOut]);
 
   if (!customAppUrl) return null;
 
