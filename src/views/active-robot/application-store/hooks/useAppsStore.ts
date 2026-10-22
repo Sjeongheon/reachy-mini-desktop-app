@@ -2,6 +2,7 @@ import { useEffect, useCallback, useRef, useMemo } from 'react';
 import useAppStore from '@store/useAppStore';
 import { DAEMON_CONFIG, fetchWithTimeout, buildApiUrl } from '@config/daemon';
 import { useLogger } from '@utils/logging';
+import { createSingleFlight } from '@utils/singleFlight';
 import { useAppFetching, mergeAppsData } from './useAppFetching';
 import { useAppJobs } from './useAppJobs';
 import { useAppUpdates } from './useAppUpdates';
@@ -98,6 +99,14 @@ const handlePermissionError = (
   return null;
 };
 
+// The catalog is a single global resource but `useAppsStore` is instantiated by
+// more than one component (ActiveRobotView and ApplicationsSection), so a
+// per-instance `useRef` guard cannot deduplicate anything: each instance had its
+// own flag and both issued the request. The daemon serialises them, which turned
+// a ~3.5s catalog call into ~6.8s and pushed it past the fetch timeout. Share
+// one in-flight fetch across every instance instead.
+const catalogSingleFlight = createSingleFlight<AppLike[]>();
+
 export function useAppsStore(isActive: boolean) {
   const logger = useLogger();
   const availableApps = useAppStore(s => s.availableApps) as AppLike[];
@@ -107,6 +116,8 @@ export function useAppsStore(isActive: boolean) {
   const appsLoading = useAppStore(s => s.appsLoading) as boolean;
   const appsError = useAppStore(s => s.appsError) as string | null;
   const isStoppingApp = useAppStore(s => (s as unknown as AnyRecord).isStoppingApp) as boolean;
+  const startupAppName = useAppStore(s => s.startupAppName) as string | null;
+  const setStartupApp = useAppStore(s => s.setStartupApp) as (name: string | null) => void;
   const setAvailableApps = useAppStore(s => s.setAvailableApps) as (apps: AppLike[]) => void;
   const setInstalledApps = useAppStore(s => s.setInstalledApps) as (apps: AppLike[]) => void;
   const setCurrentApp = useAppStore(s => s.setCurrentApp) as (app: CurrentAppStatus | null) => void;
@@ -123,8 +134,6 @@ export function useAppsStore(isActive: boolean) {
 
   const { fetchAppsFromWebsite, fetchInstalledApps } = useAppFetching();
 
-  const isFetchingRef = useRef<boolean>(false);
-
   const errorClearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const lastDismissedErrorAppRef = useRef<string | null>(null);
@@ -133,10 +142,6 @@ export function useAppsStore(isActive: boolean) {
 
   const fetchAvailableApps = useCallback(
     async (forceRefresh: boolean = false): Promise<AppLike[]> => {
-      if (isFetchingRef.current) {
-        return useAppStore.getState().availableApps as AppLike[];
-      }
-
       const storeState = useAppStore.getState() as unknown as AnyRecord;
       const currentAvailableApps = storeState.availableApps as AppLike[];
       const currentInstalledApps = storeState.installedApps as AppLike[];
@@ -160,71 +165,72 @@ export function useAppsStore(isActive: boolean) {
         return currentAvailableApps;
       }
 
-      try {
-        isFetchingRef.current = true;
-        setAppsLoading(true);
-        setAppsError(null);
-
-        let availableAppsFromWebsite: AppLike[] = [];
-        let fetchError: Error | null = null;
-
+      const runCatalogFetch = async (): Promise<AppLike[]> => {
         try {
-          availableAppsFromWebsite = (await fetchAppsFromWebsite()) as AppLike[];
-        } catch (err) {
-          fetchError = err as Error;
-          console.error('❌ Failed to fetch apps from website:', (err as Error).message);
-        }
-
-        const installedResult = await fetchInstalledApps();
-        const installedAppsFromDaemon = (installedResult.apps || []) as AppLike[];
-
-        if (installedResult.error) {
-          console.warn(`⚠️ Error fetching installed apps: ${installedResult.error}`);
-        }
-
-        const hasNetworkIssue =
-          availableAppsFromWebsite.length === 0 && (fetchError || !navigator.onLine);
-
-        if (hasNetworkIssue) {
-          if (installedAppsFromDaemon.length === 0) {
-            const errorMessage = 'No internet connection. Please check your network and try again.';
-            console.error(`❌ ${errorMessage}`);
-            setAppsError(errorMessage);
-            setAppsLoading(false);
-            isFetchingRef.current = false;
-            return [];
-          } else {
-            const warningMessage = `No internet connection - showing ${installedAppsFromDaemon.length} installed app${installedAppsFromDaemon.length > 1 ? 's' : ''} only`;
-            console.warn(`⚠️ ${warningMessage}`);
-            setAppsError(warningMessage);
-          }
-        } else {
+          setAppsLoading(true);
           setAppsError(null);
+
+          let availableAppsFromWebsite: AppLike[] = [];
+          let fetchError: Error | null = null;
+
+          try {
+            availableAppsFromWebsite = (await fetchAppsFromWebsite()) as AppLike[];
+          } catch (err) {
+            fetchError = err as Error;
+            console.error('❌ Failed to fetch apps from website:', (err as Error).message);
+          }
+
+          const installedResult = await fetchInstalledApps();
+          const installedAppsFromDaemon = (installedResult.apps || []) as AppLike[];
+
+          if (installedResult.error) {
+            console.warn(`⚠️ Error fetching installed apps: ${installedResult.error}`);
+          }
+
+          const hasNetworkIssue =
+            availableAppsFromWebsite.length === 0 && (fetchError || !navigator.onLine);
+
+          if (hasNetworkIssue) {
+            if (installedAppsFromDaemon.length === 0) {
+              const errorMessage =
+                'No internet connection. Please check your network and try again.';
+              console.error(`❌ ${errorMessage}`);
+              setAppsError(errorMessage);
+              setAppsLoading(false);
+              return [];
+            } else {
+              const warningMessage = `No internet connection - showing ${installedAppsFromDaemon.length} installed app${installedAppsFromDaemon.length > 1 ? 's' : ''} only`;
+              console.warn(`⚠️ ${warningMessage}`);
+              setAppsError(warningMessage);
+            }
+          } else {
+            setAppsError(null);
+          }
+
+          const { enrichedApps, installedApps: installed } = mergeAppsData(
+            availableAppsFromWebsite,
+            installedAppsFromDaemon
+          );
+
+          setAvailableApps(enrichedApps as AppLike[]);
+          setInstalledApps(installed as AppLike[]);
+
+          if (hasNetworkIssue) {
+            invalidateAppsCache();
+          }
+
+          setAppsLoading(false);
+
+          return enrichedApps as AppLike[];
+        } catch (err) {
+          console.error('❌ Failed to fetch apps:', err);
+          setAppsError((err as Error).message);
+          setAppsLoading(false);
+          return useAppStore.getState().availableApps as AppLike[];
         }
+      };
 
-        const { enrichedApps, installedApps: installed } = mergeAppsData(
-          availableAppsFromWebsite,
-          installedAppsFromDaemon
-        );
-
-        setAvailableApps(enrichedApps as AppLike[]);
-        setInstalledApps(installed as AppLike[]);
-
-        if (hasNetworkIssue) {
-          invalidateAppsCache();
-        }
-
-        setAppsLoading(false);
-
-        return enrichedApps as AppLike[];
-      } catch (err) {
-        console.error('❌ Failed to fetch apps:', err);
-        setAppsError((err as Error).message);
-        setAppsLoading(false);
-        return useAppStore.getState().availableApps as AppLike[];
-      } finally {
-        isFetchingRef.current = false;
-      }
+      return catalogSingleFlight(runCatalogFetch);
     },
     [
       fetchAppsFromWebsite,
@@ -286,6 +292,16 @@ export function useAppsStore(isActive: boolean) {
       const status = (await response.json()) as CurrentAppStatus | null;
       const store = useAppStore.getState() as unknown as AnyRecord;
 
+      // Close the opened app UI when it stops, independent of the robot lock
+      // (an external sleep clears the lock before this poll sees the stop).
+      const closeOpenedAppUi = (name?: string): void => {
+        if (name) closeAppWindow(name).catch(() => {});
+        // Don't clobber a non-embedded right-panel view.
+        if (store.rightPanelView === 'embedded-app') {
+          (store.closeEmbeddedApp as () => void)();
+        }
+      };
+
       if (status && status.info && status.state) {
         const appState = status.state;
         const appName = status.info.name as string;
@@ -334,10 +350,11 @@ export function useAppsStore(isActive: boolean) {
 
           if (appState === 'done') {
             setCurrentApp(null);
-            (store.closeEmbeddedApp as () => void)();
+            closeOpenedAppUi(appName);
+          } else if (appState === 'stopping') {
+            closeOpenedAppUi(appName);
           } else if (appState === 'error') {
-            closeAppWindow(appName).catch(() => {});
-            (store.closeEmbeddedApp as () => void)();
+            closeOpenedAppUi(appName);
 
             if (!errorClearTimerRef.current) {
               errorClearTimerRef.current = setTimeout(() => {
@@ -351,15 +368,11 @@ export function useAppsStore(isActive: boolean) {
       } else {
         setCurrentApp(null);
 
+        const lastAppName = (store.currentAppName as string) || undefined;
+        closeOpenedAppUi(lastAppName);
+
         if (store.isAppRunning && store.busyReason === 'app-running') {
-          const lastAppName = (store.currentAppName as string) || 'unknown';
-
-          if (lastAppName !== 'unknown') {
-            closeAppWindow(lastAppName).catch(() => {});
-          }
-          (store.closeEmbeddedApp as () => void)();
-
-          logger.warning(`App ${lastAppName} stopped unexpectedly`);
+          logger.warning(`App ${lastAppName ?? 'unknown'} stopped unexpectedly`);
           (store.unlockApp as () => void)();
         }
       }
@@ -456,6 +469,12 @@ export function useAppsStore(isActive: boolean) {
 
         createJob(jobId, 'remove', appName, null, setActiveJobs, startJobPollingRef);
 
+        // The daemon clears the startup app when it's the one removed; mirror it
+        // locally so the menu/border update without a reconnect.
+        if ((useAppStore.getState() as unknown as AnyRecord).startupAppName === appName) {
+          setStartupApp(null);
+        }
+
         return jobId;
       } catch (err) {
         console.error('❌ Removal error:', err);
@@ -475,7 +494,7 @@ export function useAppsStore(isActive: boolean) {
         throw err;
       }
     },
-    [setActiveJobs, logger, setAppsError]
+    [setActiveJobs, logger, setAppsError, setStartupApp]
   );
 
   const startApp = useCallback(
@@ -523,6 +542,52 @@ export function useAppsStore(isActive: boolean) {
       }
     },
     [fetchCurrentAppStatus, logger, setAppsError, setCurrentApp]
+  );
+
+  // Fetch the app configured to auto-start on the robot's next wake-up.
+  const fetchStartupApp = useCallback(async (): Promise<void> => {
+    try {
+      const response = await fetchWithTimeout(
+        buildApiUrl('/api/apps/startup-app'),
+        {},
+        DAEMON_CONFIG.TIMEOUTS.APPS_LIST,
+        { silent: true }
+      );
+      if (!response.ok) return;
+      const data = (await response.json()) as { startup_app: string | null };
+      setStartupApp(data.startup_app ?? null);
+    } catch {
+      // Best-effort; the border indicator just stays unset on failure.
+    }
+  }, [setStartupApp]);
+
+  // Set (name) or clear (null) the auto-start app; only installed apps are valid.
+  const applyStartupApp = useCallback(
+    async (appName: string | null): Promise<void> => {
+      try {
+        const response = await fetchWithTimeout(
+          buildApiUrl('/api/apps/startup-app'),
+          {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ startup_app: appName }),
+          },
+          DAEMON_CONFIG.TIMEOUTS.COMMAND,
+          { label: appName ? `Set startup app to ${appName}` : 'Clear startup app' }
+        );
+        if (!response.ok) {
+          throw new Error(`Failed to set startup app: ${response.status}`);
+        }
+        setStartupApp(appName);
+      } catch (err) {
+        const error = err as Error;
+        console.error('❌ Failed to set startup app:', err);
+        logger.error(`Failed to set startup app (${error.message})`);
+        setAppsError(error.message);
+        throw err;
+      }
+    },
+    [logger, setAppsError, setStartupApp]
   );
 
   const stopCurrentApp = useCallback(async (): Promise<unknown> => {
@@ -599,12 +664,13 @@ export function useAppsStore(isActive: boolean) {
     }
 
     fetchAvailableApps(false);
+    fetchStartupApp();
 
     fetchCurrentAppStatus();
     const interval = setInterval(fetchCurrentAppStatus, DAEMON_CONFIG.INTERVALS.APP_STATUS);
 
     return () => clearInterval(interval);
-  }, [isActive, isWindowVisible, fetchAvailableApps, fetchCurrentAppStatus]);
+  }, [isActive, isWindowVisible, fetchAvailableApps, fetchStartupApp, fetchCurrentAppStatus]);
 
   return {
     availableApps,
@@ -615,11 +681,14 @@ export function useAppsStore(isActive: boolean) {
     error: appsError,
     isStoppingApp,
 
+    startupAppName,
     fetchAvailableApps,
     installApp,
     removeApp,
     startApp,
     stopCurrentApp,
+    fetchStartupApp,
+    applyStartupApp,
     fetchCurrentAppStatus,
     startJobPolling,
     invalidateCache: invalidateAppsCache,

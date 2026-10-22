@@ -18,6 +18,7 @@ import StopCircleOutlinedIcon from '@mui/icons-material/StopCircleOutlined';
 import MoreVertIcon from '@mui/icons-material/MoreVert';
 import OpenInNewIcon from '@mui/icons-material/OpenInNew';
 import LaunchIcon from '@mui/icons-material/Launch';
+import RocketLaunchOutlinedIcon from '@mui/icons-material/RocketLaunchOutlined';
 import ArrowUpwardIcon from '@mui/icons-material/ArrowUpward';
 import DiscoverAppsButton from '../discover/Button';
 import ReachiesCarousel from '@components/ReachiesCarousel';
@@ -431,6 +432,8 @@ interface InstalledAppsSectionProps {
   handleStartApp: (appName: string) => void;
   handleUninstall: (appName: string) => void;
   handleUpdate?: (appName: string) => void;
+  handleToggleStartupApp?: (appName: string) => void;
+  startupAppName?: string | null;
   hasUpdate?: (appName: string) => boolean;
   isCheckingUpdates?: boolean;
   hasCheckedOnce?: boolean;
@@ -450,6 +453,8 @@ export default function InstalledAppsSection({
   handleStartApp,
   handleUninstall,
   handleUpdate,
+  handleToggleStartupApp,
+  startupAppName,
   hasUpdate,
   getJobInfo,
   stopCurrentApp,
@@ -595,6 +600,7 @@ export default function InstalledAppsSection({
               );
 
               const isMenuOpen = menuAppName === app.name;
+              const isStartupApp = !!startupAppName && startupAppName === app.name;
 
               return (
                 <Box
@@ -602,12 +608,16 @@ export default function InstalledAppsSection({
                   sx={{
                     borderRadius: '14px',
                     bgcolor: palette.isDark ? whiteAlpha(0.02) : 'white',
-                    border: `1px solid ${
+                    // Startup app gets a bold accent border (error still wins);
+                    // the running-app green glow below is kept independently.
+                    border: `${isStartupApp && !hasAppError ? '2px' : '1px'} solid ${
                       hasAppError
                         ? palette.statusError
-                        : isCurrentlyRunning
-                          ? palette.statusSuccess
-                          : palette.border
+                        : isStartupApp
+                          ? ACCENT.main
+                          : isCurrentlyRunning
+                            ? palette.statusSuccess
+                            : palette.border
                     }`,
                     transition: `${transition(['opacity', 'filter'], DURATION.medium)}, ${transition('border-color', DURATION.base)}`,
                     overflow: 'hidden',
@@ -615,7 +625,9 @@ export default function InstalledAppsSection({
                       ? ERROR_GLOW
                       : isCurrentlyRunning
                         ? SUCCESS_GLOW
-                        : 'none',
+                        : isStartupApp
+                          ? `0 0 0 1px ${accentAlpha(0.25)}`
+                          : 'none',
                     opacity: isRemoving ? 0.5 : isBusy && !isCurrentlyRunning ? 0.4 : 1,
                     filter: isBusy && !isCurrentlyRunning ? 'grayscale(50%)' : 'none',
                     '&:hover .more-menu-btn': {
@@ -1046,6 +1058,7 @@ export default function InstalledAppsSection({
                   !!currentApp && !!currentApp.info && currentApp.info.name === menuAppName;
                 const appState = isThisAppCurrent && currentApp?.state ? currentApp.state : null;
                 const isCurrentlyRunning = appState === 'running';
+                const isStartupApp = !!startupAppName && startupAppName === menuAppName;
 
                 return [
                   hfUrl && (
@@ -1069,6 +1082,36 @@ export default function InstalledAppsSection({
                       </ListItemIcon>
                       <ListItemText
                         primary="View on HuggingFace"
+                        primaryTypographyProps={{ fontSize: TYPO.sm }}
+                      />
+                    </MenuItem>
+                  ),
+                  handleToggleStartupApp && (
+                    <MenuItem
+                      key="startup"
+                      onClick={() => {
+                        handleToggleStartupApp(menuAppName as string);
+                        handleMenuClose();
+                      }}
+                      sx={{
+                        fontSize: TYPO.sm,
+                        py: 1,
+                        color: isStartupApp ? ACCENT.main : palette.textSecondary,
+                        '&:hover': {
+                          bgcolor: palette.isDark ? whiteAlpha(0.06) : blackAlpha(0.04),
+                        },
+                      }}
+                    >
+                      <ListItemIcon>
+                        <RocketLaunchOutlinedIcon
+                          sx={{
+                            fontSize: 15,
+                            color: isStartupApp ? ACCENT.main : palette.textMuted,
+                          }}
+                        />
+                      </ListItemIcon>
+                      <ListItemText
+                        primary={isStartupApp ? 'Remove from startup' : 'Launch as startup'}
                         primaryTypographyProps={{ fontSize: TYPO.sm }}
                       />
                     </MenuItem>

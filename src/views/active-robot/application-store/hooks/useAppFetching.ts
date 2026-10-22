@@ -248,7 +248,7 @@ export function useAppFetching(): UseAppFetchingReturn {
       const response = await fetchWithTimeout(
         buildApiUrl(DAEMON_APPS_CATALOG_ENDPOINT),
         {},
-        DAEMON_CONFIG.TIMEOUTS.APPS_LIST,
+        DAEMON_CONFIG.TIMEOUTS.APPS_CATALOG,
         { silent: true }
       );
 
@@ -267,12 +267,15 @@ export function useAppFetching(): UseAppFetchingReturn {
     const daemonCatalogResult = await fetchAppsFromDaemonCatalog();
 
     try {
+      // No `credentials: 'include'`. The catalog is public, and the Space does
+      // not send `Access-Control-Allow-Credentials`, so a credentialed request
+      // is rejected by CORS before we ever see the body — the website source
+      // then silently never contributes and we fall back to the daemon catalog
+      // on every single call.
       const websiteResponse = await fetchExternal(
         WEBSITE_API_URL,
-        {
-          credentials: 'include',
-        },
-        DAEMON_CONFIG.TIMEOUTS.APPS_LIST,
+        {},
+        DAEMON_CONFIG.TIMEOUTS.APPS_CATALOG,
         {
           silent: true,
         }
@@ -288,8 +291,15 @@ export function useAppFetching(): UseAppFetchingReturn {
       const websiteApps = normalizeCatalogApps(websiteData);
       const mergedApps = mergeCatalogApps(websiteApps, daemonCatalogResult.apps);
 
+      // Cache age moved from response body to the standard `Age`
+      // HTTP header (RFC 7234 §5.1) so the body stays byte-stable
+      // across same-cache-window requests and ETag-based 304s
+      // work. Falls back to `?` when the header is absent (older
+      // website deploy or a daemon-only fallback) to keep the log
+      // line readable rather than emitting `null`.
+      const cacheAge = websiteResponse.headers.get('age') ?? '?';
       console.log(
-        `[Apps] Fetched ${mergedApps.length} apps from catalog (website=${websiteApps.length}, daemon=${daemonCatalogResult.apps.length}, cache age: ${websiteData.cacheAge}s)`
+        `[Apps] Fetched ${mergedApps.length} apps from catalog (website=${websiteApps.length}, daemon=${daemonCatalogResult.apps.length}, cache age: ${cacheAge}s)`
       );
 
       return mergedApps;
@@ -331,6 +341,10 @@ export function useAppFetching(): UseAppFetchingReturn {
     const RETRY_DELAYS = [1000, 2000, 3000];
 
     try {
+      // Stays on the shorter APPS_LIST budget: this route is served from local
+      // state (~0.4s measured) rather than the HuggingFace-backed catalog, and
+      // it is wrapped in a 3-attempt retry loop, so a long timeout here would
+      // multiply into a minute-long stall when the daemon is actually down.
       const installedUrl = buildApiUrl('/api/apps/list-available/installed');
       const installedResponse = await fetchWithTimeout(
         installedUrl,

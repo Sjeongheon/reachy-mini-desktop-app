@@ -22,6 +22,16 @@ const isJournalWindow = window.location.hash === '#journal';
 const isLogViewer = window.location.hash === '#log-viewer';
 const DEV_MODE = isDevPath && !isWebMode;
 
+// React 19 dev builds emit a performance.measure() per component per commit,
+// and the measure timeline is unbounded native memory. This app commits at
+// 20Hz, so clear it periodically. Production builds emit no such measures.
+if (import.meta.env.DEV) {
+  setInterval(() => {
+    performance.clearMeasures();
+    performance.clearMarks();
+  }, 10_000);
+}
+
 // Mock Tauri APIs if not in Tauri (browser/web mode)
 if (typeof window !== 'undefined' && !window.__TAURI__) {
   window.__TAURI__ = {
@@ -49,18 +59,9 @@ import WebApp from './components/WebApp';
 import JournalWindow from './views/bluetooth-support/JournalWindow';
 import LogViewerWindow from './views/log-viewer/LogViewerWindow';
 import ErrorBoundary from './components/ErrorBoundary';
-import robotModelCache from './utils/robotModelCache';
 import useAppStore from './store/useAppStore';
 
-// 🚀 Preload robot 3D model (FORCE complete reload)
-robotModelCache.clear();
-
-// Wait a bit to ensure clear is effective
-setTimeout(() => {
-  robotModelCache.load().catch(err => {
-    console.error('❌ Failed to preload robot model:', err);
-  });
-}, 100);
+// Robot 3D model (glb) is preloaded by GLTFRobot via useGLTF.preload.
 
 // Theme wrapper component that adapts to darkMode
 function ThemeWrapper({ children }: { children: ReactNode }) {

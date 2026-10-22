@@ -27,9 +27,14 @@ fn crash_marker_path() -> Option<std::path::PathBuf> {
 }
 use discovery::DiscoveryState;
 use local_proxy::LocalProxyState;
-use std::sync::Arc;
+use std::io::{ErrorKind, Read, Write};
+use std::net::TcpListener;
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
 use tauri::{Manager, State};
 use tauri_plugin_log::{Target, TargetKind};
+use tauri_plugin_opener::OpenerExt;
 
 #[cfg(not(windows))]
 use signal_hook::{consts::TERM_SIGNALS, iterator::Signals};
@@ -142,6 +147,324 @@ fn get_logs(state: State<DaemonState>) -> Result<Vec<String>, String> {
     Ok(logs.iter().cloned().collect())
 }
 
+static CAMERA_VIEWER_HTML: Mutex<String> = Mutex::new(String::new());
+static CAMERA_VIEWER_PORT: Mutex<Option<u16>> = Mutex::new(None);
+
+/// True when the header block has exactly one `Host` equal to `expected`.
+fn camera_viewer_host_allowed(req: &[u8], expected: &str) -> bool {
+    let Some(end) = req.windows(4).position(|w| w == b"\r\n\r\n") else {
+        return false;
+    };
+    let Ok(text) = std::str::from_utf8(&req[..end]) else {
+        return false;
+    };
+    let mut found: Option<&str> = None;
+    for (i, line) in text.split("\r\n").enumerate() {
+        if i == 0 {
+            continue;
+        }
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if !name.trim().eq_ignore_ascii_case("host") {
+            continue;
+        }
+        if found.is_some() {
+            return false;
+        }
+        found = Some(value.trim());
+    }
+    found == Some(expected)
+}
+
+fn camera_viewer_write(stream: &mut impl Write, response: &[u8]) {
+    if let Err(e) = stream.write_all(response) {
+        log::warn!("[camera] Viewer write failed: {e}");
+    }
+}
+
+fn clear_camera_viewer_port_if_current(port: u16) {
+    let mut guard = CAMERA_VIEWER_PORT.lock().unwrap_or_else(|e| e.into_inner());
+    if *guard == Some(port) {
+        *guard = None;
+    }
+}
+
+/// Serve the camera viewer over loopback so Snap/Flatpak browsers can load it.
+fn ensure_camera_viewer_server() -> Result<u16, String> {
+    let mut port_guard = CAMERA_VIEWER_PORT
+        .lock()
+        .map_err(|e| format!("Camera viewer port mutex poisoned: {e}"))?;
+    if let Some(port) = *port_guard {
+        return Ok(port);
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .map_err(|e| format!("Failed to bind camera viewer: {e}"))?;
+    let port = listener
+        .local_addr()
+        .map_err(|e| format!("Failed to read camera viewer address: {e}"))?
+        .port();
+    let expected_host = format!("127.0.0.1:{port}");
+
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let mut stream = match stream {
+                Ok(s) => s,
+                Err(e) => match e.kind() {
+                    ErrorKind::Interrupted
+                    | ErrorKind::ConnectionAborted
+                    | ErrorKind::ConnectionReset => {
+                        log::warn!("[camera] Viewer accept failed: {e}");
+                        continue;
+                    }
+                    _ => {
+                        log::error!("[camera] Viewer accept failed: {e}");
+                        clear_camera_viewer_port_if_current(port);
+                        break;
+                    }
+                },
+            };
+            let timeout = Some(Duration::from_secs(2));
+            let _ = stream.set_read_timeout(timeout);
+            let _ = stream.set_write_timeout(timeout);
+            let mut req = Vec::new();
+            let mut tmp = [0u8; 512];
+            let mut headers_complete = false;
+            let mut peer_closed = false;
+            loop {
+                match stream.read(&mut tmp) {
+                    Ok(0) => {
+                        peer_closed = true;
+                        break;
+                    }
+                    Err(_) => break,
+                    Ok(n) => {
+                        req.extend_from_slice(&tmp[..n]);
+                        if req.windows(4).any(|w| w == b"\r\n\r\n") {
+                            headers_complete = true;
+                            break;
+                        }
+                        if req.len() > 8192 {
+                            break;
+                        }
+                    }
+                }
+            }
+            if !peer_closed {
+                if headers_complete && camera_viewer_host_allowed(&req, &expected_host) {
+                    let html = CAMERA_VIEWER_HTML
+                        .lock()
+                        .ok()
+                        .map(|guard| guard.clone())
+                        .unwrap_or_default();
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        html.len(),
+                        html
+                    );
+                    camera_viewer_write(&mut stream, response.as_bytes());
+                } else {
+                    camera_viewer_write(
+                        &mut stream,
+                        b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    );
+                }
+            }
+        }
+        clear_camera_viewer_port_if_current(port);
+    });
+
+    *port_guard = Some(port);
+    log::info!("[camera] Viewer listening on http://127.0.0.1:{port}/");
+    Ok(port)
+}
+
+#[tauri::command]
+fn open_external_camera_viewer(
+    app_handle: tauri::AppHandle,
+    host: Option<String>,
+) -> Result<String, String> {
+    let host = host
+        .filter(|h| !h.trim().is_empty())
+        .unwrap_or_else(|| "localhost".to_string());
+    let signaling_url = format!("ws://{}:8443", host);
+    let signaling_url_json = serde_json::to_string(&signaling_url)
+        .map_err(|e| format!("Failed to serialize signaling URL: {}", e))?;
+    let html = external_camera_viewer_html()
+        .replace("__SIGNALING_URL__", &signaling_url_json)
+        .replace("__GST_WEBRTC_API__", gstwebrtc_api_js());
+
+    *CAMERA_VIEWER_HTML
+        .lock()
+        .map_err(|e| format!("Camera viewer html mutex poisoned: {e}"))? = html;
+
+    let port = ensure_camera_viewer_server()?;
+    let url = format!("http://127.0.0.1:{port}/");
+
+    app_handle
+        .opener()
+        .open_url(url.clone(), None::<&str>)
+        .map_err(|e| format!("Failed to open external camera viewer: {}", e))?;
+
+    Ok(url)
+}
+
+fn external_camera_viewer_html() -> &'static str {
+    r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Reachy Mini Camera</title>
+  <style>
+    :root { color-scheme: dark; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background: #0f1115;
+      color: #f4f4f5;
+      font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    main {
+      width: min(100vw, 1280px);
+      height: min(100vh, 720px);
+      position: relative;
+      background: #050608;
+      overflow: hidden;
+    }
+    video {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      background: #050608;
+    }
+    #status {
+      position: absolute;
+      left: 16px;
+      bottom: 16px;
+      max-width: calc(100% - 32px);
+      padding: 10px 12px;
+      border-radius: 10px;
+      background: rgba(0, 0, 0, 0.65);
+      color: #d4d4d8;
+      font: 12px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <video id="video" autoplay playsinline controls muted></video>
+    <div id="status">Connecting...</div>
+  </main>
+  <script>
+    __GST_WEBRTC_API__
+  </script>
+  <script>
+    const signalingUrl = __SIGNALING_URL__;
+    const video = document.getElementById('video');
+    const status = document.getElementById('status');
+    let api = null;
+    let session = null;
+
+    function log(message) {
+      console.log('[Reachy Camera]', message);
+      status.textContent = message;
+    }
+
+    function closeSession() {
+      if (session) {
+        session.close();
+        session = null;
+      }
+      if (api?._channel) {
+        api._channel.close();
+      }
+      api = null;
+      video.srcObject = null;
+    }
+
+    function connectToProducer(producer) {
+      if (session || producer.meta?.name !== 'reachymini') return;
+
+      log('Starting stream session...');
+      session = api.createConsumerSession(producer.id);
+      if (!session) {
+        log('Failed to create stream session');
+        return;
+      }
+
+      session.addEventListener('error', event => {
+        console.error(event);
+        log(`Stream error: ${event.message || event.error || 'Unknown error'}`);
+      });
+      session.addEventListener('closed', () => {
+        log('Session closed');
+        session = null;
+        video.srcObject = null;
+      });
+      session.addEventListener('streamsChanged', () => {
+        const [stream] = session.streams || [];
+        if (!stream) return;
+
+        video.srcObject = stream;
+        video.play().catch(() => {});
+        log('Stream connected');
+      });
+      session.connect();
+    }
+
+    try {
+      if (!window.RTCPeerConnection) {
+        throw new Error('This browser does not support WebRTC');
+      }
+      if (!window.GstWebRTCAPI) {
+        throw new Error('GstWebRTCAPI not loaded');
+      }
+
+      api = new window.GstWebRTCAPI({
+        signalingServerUrl: signalingUrl,
+        reconnectionTimeout: 0,
+        meta: { name: 'reachy-external-browser' },
+        webrtcConfig: {
+          iceServers: [
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:stun1.l.google.com:19302' },
+          ],
+        },
+      });
+
+      api.registerConnectionListener({
+        connected: () => log(`Connected to ${signalingUrl}`),
+        disconnected: () => log('Disconnected'),
+      });
+      api.registerProducersListener({
+        producerAdded: connectToProducer,
+        producerRemoved: () => {
+          if (session) {
+            session.close();
+          }
+        },
+      });
+      window.addEventListener('beforeunload', closeSession);
+    } catch (error) {
+      console.error(error);
+      log(`Error: ${error.name || 'Error'}: ${error.message || error}`);
+    }
+  </script>
+</body>
+</html>
+"#
+}
+
+fn gstwebrtc_api_js() -> &'static str {
+    include_str!("../../src/lib/gstwebrtc-api.js")
+}
+
 // ============================================================================
 // CRASH MARKER COMMANDS
 // ============================================================================
@@ -228,7 +551,9 @@ async fn clear_local_proxy_target(state: State<'_, Arc<LocalProxyState>>) -> Res
 /// Used by the frontend reconciliation to restore `remoteHost` after a webview
 /// reload when the Rust process (and its proxy target) survived.
 #[tauri::command]
-async fn get_local_proxy_target(state: State<'_, Arc<LocalProxyState>>) -> Result<Option<String>, String> {
+async fn get_local_proxy_target(
+    state: State<'_, Arc<LocalProxyState>>,
+) -> Result<Option<String>, String> {
     Ok(local_proxy::get_target_host_public(&state).await)
 }
 
@@ -356,7 +681,6 @@ pub fn run() {
         ))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
-        .plugin(tauri_plugin_positioner::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_http::init())
@@ -465,6 +789,7 @@ pub fn run() {
             set_daemon_external_mode,
             get_daemon_status,
             get_logs,
+            open_external_camera_viewer,
             check_crash_marker,
             usb::check_usb_robot,
             window::apply_transparent_titlebar,
@@ -485,6 +810,7 @@ pub fn run() {
             wifi::scan_local_wifi_networks,
             wifi::get_current_wifi_ssid,
             update::check_daemon_update,
+            update::check_remote_daemon_update,
             update::update_daemon,
             reset::reset_apps_venv,
             reset::reset_python_env,
@@ -533,4 +859,112 @@ pub fn run() {
                 _ => {}
             }
         });
+}
+
+#[cfg(test)]
+mod camera_viewer_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    const EXPECTED: &str = "127.0.0.1:9";
+
+    fn http_req(headers: &str) -> Vec<u8> {
+        format!("GET / HTTP/1.1\r\n{headers}\r\n").into_bytes()
+    }
+
+    #[test]
+    fn host_allowed_exact_match() {
+        let req = http_req("Host: 127.0.0.1:9\r\n");
+        assert!(camera_viewer_host_allowed(&req, EXPECTED));
+    }
+
+    #[test]
+    fn host_allowed_case_insensitive_name() {
+        let req = http_req("host: 127.0.0.1:9\r\n");
+        assert!(camera_viewer_host_allowed(&req, EXPECTED));
+    }
+
+    #[test]
+    fn host_rejected_when_missing() {
+        let req = http_req("Accept: */*\r\n");
+        assert!(!camera_viewer_host_allowed(&req, EXPECTED));
+    }
+
+    #[test]
+    fn host_rejected_when_incomplete() {
+        let req = b"GET / HTTP/1.1\r\nHost: 127.0.0.1:9\r\n";
+        assert!(!camera_viewer_host_allowed(req, EXPECTED));
+    }
+
+    #[test]
+    fn host_rejected_localhost() {
+        let req = http_req("Host: localhost:9\r\n");
+        assert!(!camera_viewer_host_allowed(&req, EXPECTED));
+    }
+
+    #[test]
+    fn host_rejected_ipv6() {
+        let req = http_req("Host: [::1]:9\r\n");
+        assert!(!camera_viewer_host_allowed(&req, EXPECTED));
+    }
+
+    #[test]
+    fn host_rejected_wrong_port() {
+        let req = http_req("Host: 127.0.0.1:8\r\n");
+        assert!(!camera_viewer_host_allowed(&req, EXPECTED));
+    }
+
+    #[test]
+    fn host_rejected_duplicate() {
+        let req = http_req("Host: 127.0.0.1:9\r\nHost: 127.0.0.1:9\r\n");
+        assert!(!camera_viewer_host_allowed(&req, EXPECTED));
+    }
+
+    #[test]
+    fn host_ignores_x_forwarded_host() {
+        let forwarded_only = http_req("X-Forwarded-Host: 127.0.0.1:9\r\n");
+        assert!(!camera_viewer_host_allowed(&forwarded_only, EXPECTED));
+        let both = http_req("X-Forwarded-Host: evil.example\r\nHost: 127.0.0.1:9\r\n");
+        assert!(camera_viewer_host_allowed(&both, EXPECTED));
+    }
+
+    fn camera_viewer_get(port: u16, host: &str) -> (String, String) {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("read timeout");
+        stream
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .expect("write timeout");
+        let req = format!("GET / HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+        stream.write_all(req.as_bytes()).expect("write request");
+        let mut buf = Vec::new();
+        let _ = stream.read_to_end(&mut buf);
+        let text = String::from_utf8_lossy(&buf).into_owned();
+        let (head, body) = text.split_once("\r\n\r\n").unwrap_or((text.as_str(), ""));
+        (head.to_string(), body.to_string())
+    }
+
+    #[test]
+    fn camera_viewer_get_framing() {
+        const MARKER: &str = "camera-viewer-test-marker";
+        *CAMERA_VIEWER_HTML.lock().unwrap() = MARKER.to_string();
+        let port = ensure_camera_viewer_server().expect("bind camera viewer");
+        let expected = format!("127.0.0.1:{port}");
+
+        let (head, body) = camera_viewer_get(port, &expected);
+        assert!(head.starts_with("HTTP/1.1 200 "), "{head}");
+        assert!(
+            head.to_ascii_lowercase()
+                .contains("cache-control: no-store"),
+            "{head}"
+        );
+        assert_eq!(body, MARKER);
+
+        let (head, body) = camera_viewer_get(port, "evil.example");
+        assert!(head.starts_with("HTTP/1.1 403 "), "{head}");
+        assert!(body.is_empty(), "{body}");
+    }
 }

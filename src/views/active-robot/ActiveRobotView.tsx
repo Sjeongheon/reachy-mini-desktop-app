@@ -58,6 +58,7 @@ import { useActiveRobotContext } from './context';
 import {
   CHOREOGRAPHY_DATASETS,
   QUICK_ACTIONS,
+  getDanceDataset,
   type QuickAction,
 } from '../../constants/choreographies';
 import { WebRTCStreamProvider } from '../../contexts/WebRTCStreamContext';
@@ -152,6 +153,8 @@ function ActiveRobotView({
     startApp: noopAsync as (appName: string) => Promise<unknown>,
     stopCurrentApp: noopAsync as () => Promise<unknown>,
     triggerUpdate: noopAsync as (appName: string) => Promise<unknown>,
+    applyStartupApp: noopAsync as (appName: string | null) => Promise<void>,
+    startupAppName: null,
     showToast,
   });
 
@@ -321,7 +324,7 @@ function ActiveRobotView({
       if (action.type === 'action') {
         sendCommand(`/api/move/play/${action.name}`, action.label);
       } else if (action.type === 'dance') {
-        playRecordedMove(CHOREOGRAPHY_DATASETS.DANCES, action.name);
+        playRecordedMove(getDanceDataset(action.name), action.name);
       } else {
         playRecordedMove(CHOREOGRAPHY_DATASETS.EMOTIONS, action.name);
       }
@@ -373,9 +376,9 @@ function ActiveRobotView({
     <WebRTCStreamProvider>
       <Box
         sx={{
-          width: '100vw',
-          height: '100vh',
-          // TODO(style-migration): root viewport scrim uses 0.95/0.85 alpha; palette.surfaceBg is opaque/translucent differently.
+          width: '100%',
+          height: '100%',
+          boxSizing: 'border-box',
           background: palette.isDark ? 'rgba(26, 26, 26, 0.95)' : 'rgba(250, 250, 252, 0.85)',
           backdropFilter: BLUR.lg,
           WebkitBackdropFilter: BLUR.lg,
@@ -510,11 +513,11 @@ function ActiveRobotView({
             bgcolor: 'transparent',
           }}
         >
-          {/* Left column (450px) - Current content */}
+          {/* Left column */}
           <Box
             sx={{
-              width: '450px',
-              flexShrink: 0,
+              flex: '1 1 0',
+              minWidth: 0,
               display: 'flex',
               flexDirection: 'column',
               alignItems: 'center',
@@ -525,6 +528,7 @@ function ActiveRobotView({
               position: 'relative',
               zIndex: 1,
               height: '100%',
+              boxSizing: 'border-box',
               // TODO(style-migration): left-column scrim uses 0.6/0.7 alpha; no direct palette surface token match.
               bgcolor: palette.isDark ? 'rgba(20, 20, 20, 0.6)' : 'rgba(245, 245, 247, 0.7)',
               borderRight: `1px solid ${palette.border}`,
@@ -615,15 +619,19 @@ function ActiveRobotView({
             </Box>
           </Box>
 
-          {/* Right column (450px) - Application Store */}
+          {/* Right column */}
           <Box
             sx={{
-              width: '450px',
-              flexShrink: 0,
+              flex: '1 1 0',
+              minWidth: 0,
               display: 'flex',
               flexDirection: 'column',
               position: 'relative',
               zIndex: 2,
+              height: '100%',
+              minHeight: 0,
+              overflow: 'hidden',
+              boxSizing: 'border-box',
               pt: rightPanelView === 'embedded-app' ? 0 : '33px',
               transform: rightPanelView === 'embedded-app' ? 'none' : 'translateY(-8px)',
               bgcolor: 'transparent !important',
