@@ -306,7 +306,6 @@ export default function DiscoverModal({
                 const getCardProps = (app: AppLike, idx: number) => {
                   const installJob = getJobInfo(app.name, 'install');
                   return {
-                    key: app.name,
                     app,
                     isBusy,
                     isInstalling: isJobRunning(app.name, 'install'),
