@@ -23,6 +23,12 @@ describe('parseWebAppUrl', () => {
     'https://reachy-mini.local:8443/',
     'http://[::1]:7861/',
   ])('preserves valid web interface addresses: %s', value => {
-    expect(parseWebAppUrl(value)?.toString()).toBe(value);
+    expect(parseWebAppUrl(value)).toBe(value);
+  });
+
+  it('points the address at the given host', () => {
+    expect(parseWebAppUrl('http://0.0.0.0:7861/app', 'reachy-mini.local')).toBe(
+      'http://reachy-mini.local:7861/app'
+    );
   });
 });

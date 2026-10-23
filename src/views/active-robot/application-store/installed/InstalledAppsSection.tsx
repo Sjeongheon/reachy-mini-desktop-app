@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Box,
   Typography,
@@ -96,7 +96,7 @@ interface UrlAccessibilityResult {
 }
 
 function useUrlAccessibility(
-  url: string | undefined,
+  url: string | null | undefined,
   enabled: boolean = false,
   onTimeout: (() => void) | null = null,
   timeoutMs: number = 30000
@@ -289,7 +289,7 @@ function OpenAppButton({
 }: OpenAppButtonProps): React.ReactElement | null {
   const palette = useAppPalette();
   const [hasTimedOut, setHasTimedOut] = useState<boolean>(false);
-  const webAppUrl = useMemo(() => parseWebAppUrl(customAppUrl)?.toString(), [customAppUrl]);
+  const webAppUrl = parseWebAppUrl(customAppUrl, getDaemonHostname());
 
   const handleTimeout = useCallback(() => {
     setHasTimedOut(true);
@@ -323,13 +323,7 @@ function OpenAppButton({
     };
     if (store.embeddedAppDismissed) return;
     if (store.rightPanelView === 'embedded-app') return;
-    try {
-      const url = new URL(webAppUrl);
-      url.hostname = getDaemonHostname();
-      store.openEmbeddedApp(url.toString());
-    } catch {
-      // URL parsing failed - user can still open manually
-    }
+    store.openEmbeddedApp(webAppUrl);
   }, [isAccessible, webAppUrl, isPoppedOut]);
 
   if (!webAppUrl) return null;
@@ -346,15 +340,9 @@ function OpenAppButton({
 
   const handleClick = async (e: React.MouseEvent): Promise<void> => {
     e.stopPropagation();
-    try {
-      const url = new URL(webAppUrl);
-      url.hostname = getDaemonHostname();
-      (
-        useAppStore.getState() as unknown as { openEmbeddedApp: (url: string) => void }
-      ).openEmbeddedApp(url.toString());
-    } catch (err) {
-      console.error('Failed to open app web interface:', err);
-    }
+    (
+      useAppStore.getState() as unknown as { openEmbeddedApp: (url: string) => void }
+    ).openEmbeddedApp(webAppUrl);
   };
 
   if (isPoppedOut) return null;
