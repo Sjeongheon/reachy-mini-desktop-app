@@ -37,6 +37,15 @@ mod tests {
             std::process::exit(if has_console { 1 } else { 0 });
         }
 
+        // Without a console window of our own (CI runners, IDEs), a child spawned
+        // without CREATE_NO_WINDOW has no console window either, so the check
+        // below would pass even if the flag were missing. Only a terminal run can tell.
+        // SAFETY: same as above.
+        if unsafe { get_console_window() }.is_null() {
+            eprintln!("skipped: the test runner has no console window, run it from a terminal");
+            return;
+        }
+
         let test_executable = std::env::current_exe().expect("test executable path");
         let output = without_console(test_executable)
             .args([
