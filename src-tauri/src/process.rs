@@ -5,6 +5,8 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Build a process command without showing a console window on Windows.
 pub(crate) fn without_console(program: impl AsRef<OsStr>) -> Command {
+    // Only mutated on Windows.
+    #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
     let mut command = Command::new(program);
 
     #[cfg(target_os = "windows")]
